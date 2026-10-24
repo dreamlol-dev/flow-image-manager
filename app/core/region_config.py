@@ -142,7 +142,7 @@ _DEFAULT_PRESET_A = LayoutPreset(
     name="Single Region",
     description="One small mark near the bottom-right corner.",
     regions=[
-        NormalizedRegion(x=0.92, y=0.93, width=0.07, height=0.06, label="mark"),
+        NormalizedRegion(x=0.9465, y=0.8997, width=0.0228, height=0.0452, label="mark"),
     ],
 )
 
@@ -152,8 +152,8 @@ _DEFAULT_PRESET_B = LayoutPreset(
     name="Double Region",
     description="Two marks near the bottom-right corner: upper (larger) and lower (smaller).",
     regions=[
-        NormalizedRegion(x=0.88, y=0.86, width=0.11, height=0.07, label="upper_mark"),
-        NormalizedRegion(x=0.92, y=0.93, width=0.07, height=0.06, label="lower_mark"),
+        NormalizedRegion(x=0.9053, y=0.8373, width=0.0486, height=0.0733, label="upper_mark"),
+        NormalizedRegion(x=0.9465, y=0.8997, width=0.0228, height=0.0452, label="lower_mark"),
     ],
 )
 
