@@ -1,0 +1,31 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller build artifacts (allow the final executable)
+build/
+*.spec
+
+# Testing & cache
+.pytest_cache/
+.thumbcache/
+*.tmp
+
+# Runtime data & logs
+*.db
+*.db-journal
+logs/*.log
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE / OS files
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store
