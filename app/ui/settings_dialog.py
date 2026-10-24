@@ -8,7 +8,10 @@ Two tabs:
 The region editor lets the user:
   - Pick a preset (A or B).
   - Load a reference image.
-  - Drag rectangle handles to reposition / resize each region.
+  - Smoothly zoom (mouse wheel, buttons, or Zoom to Mark).
+  - Pan freely across the image.
+  - Drag rectangle handles to reposition / resize each region with high precision.
+  - Keep watermark artwork 100% visible with external labels and toggleable fill.
   - Save the configuration.
 """
 
@@ -23,7 +26,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QColor, QMouseEvent, QPainter, QPen, QBrush, QImage, QPixmap, QFont,
-    QPaintEvent
+    QPaintEvent, QWheelEvent
 )
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
@@ -46,23 +49,29 @@ from app.ui.icons import get_icon, get_pixmap
 
 class RegionEditorCanvas(QWidget):
     """
-    Canvas that displays a reference image and allows the user to
-    drag-resize normalized region rectangles.
+    Interactive canvas displaying a reference image with zoom, pan,
+    and drag-resizable normalized region rectangles.
 
-    Emits ``regions_changed(list[NormalizedRegion])`` on every edit.
+    Features:
+      - Smooth cursor-centered mouse wheel zoom (0.5x to 16x).
+      - Click-and-drag panning (Middle-drag, Right-drag, or Left-drag on background).
+      - One-click zoom directly to watermark mark coordinates (4x).
+      - Unobtrusive labels positioned outside the region boxes to prevent blocking artwork.
+      - Toggleable labels and box fill for 100% transparent pixel visibility.
+      - Corner handles for accurate resizing.
     """
 
-    regions_changed = Signal(list)  # list[NormalizedRegion]
+    regions_changed = Signal(list)   # list[NormalizedRegion]
+    zoom_changed    = Signal(float)  # current zoom factor
+    region_selected = Signal(int)    # selected region index
 
-    _HANDLE_SIZE = 9  # px
-    _MIN_DIM = 0.01   # minimum normalized region dimension
+    _HANDLE_SIZE = 8   # handle square dimension in pixels
+    _MIN_DIM     = 0.005  # minimum normalized region dimension
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setMinimumSize(420, 320)
-        self.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
+        self.setMinimumSize(440, 340)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.CrossCursor)
 
@@ -71,9 +80,21 @@ class RegionEditorCanvas(QWidget):
         self._colors = [
             QColor(108, 92, 231),  # purple (#6c5ce7)
             QColor(0, 184, 148),   # emerald (#00b894)
+            QColor(253, 203, 110), # gold (#fdcb6e)
         ]
 
-        # Drag state
+        # Zoom & Pan state
+        self._zoom: float = 1.0
+        self._pan_offset: QPointF = QPointF(0, 0)
+        self._is_panning: bool = False
+        self._pan_start_pos: QPointF = QPointF()
+
+        # Display options
+        self._show_labels: bool = True
+        self._show_fill: bool = True
+        self._selected_region_idx: int = -1
+
+        # Drag-resize state
         self._drag_region_idx: int = -1
         self._drag_handle: str = ""   # "body", "nw","ne","sw","se"
         self._drag_start_pos: QPointF = QPointF()
@@ -86,7 +107,7 @@ class RegionEditorCanvas(QWidget):
         if qimg.isNull():
             return False
         self._pixmap = QPixmap.fromImage(qimg)
-        self.update()
+        self.zoom_fit()
         return True
 
     def set_regions(self, regions: list[NormalizedRegion]) -> None:
@@ -96,28 +117,116 @@ class RegionEditorCanvas(QWidget):
     def get_regions(self) -> list[NormalizedRegion]:
         return [copy.deepcopy(r) for r in self._regions]
 
+    def set_show_labels(self, show: bool) -> None:
+        self._show_labels = show
+        self.update()
+
+    def set_show_fill(self, show: bool) -> None:
+        self._show_fill = show
+        self.update()
+
+    # ── Zoom & Pan API ──────────────────────────────────────────────────────
+
+    @property
+    def zoom(self) -> float:
+        return self._zoom
+
+    def zoom_in(self) -> None:
+        self.zoom_at(1.3, QPointF(self.width() / 2, self.height() / 2))
+
+    def zoom_out(self) -> None:
+        self.zoom_at(1 / 1.3, QPointF(self.width() / 2, self.height() / 2))
+
+    def zoom_fit(self) -> None:
+        self._zoom = 1.0
+        self._pan_offset = QPointF(0, 0)
+        self.update()
+        self.zoom_changed.emit(1.0)
+
+    def zoom_to_mark(self, zoom_factor: float = 4.0) -> None:
+        """Instantly centers and magnifies the region area (or bottom-right)."""
+        if not self._pixmap or self._pixmap.isNull():
+            return
+
+        if self._regions:
+            min_x = min(r.x for r in self._regions)
+            max_x = max(r.x + r.width for r in self._regions)
+            min_y = min(r.y for r in self._regions)
+            max_y = max(r.y + r.height for r in self._regions)
+            target_nx = (min_x + max_x) / 2
+            target_ny = (min_y + max_y) / 2
+        else:
+            target_nx, target_ny = 0.9465, 0.8997
+
+        self._zoom = zoom_factor
+        pw = self._pixmap.width()
+        ph = self._pixmap.height()
+        ww = max(10, self.width() - 20)
+        wh = max(10, self.height() - 20)
+        base_scale = min(ww / pw, wh / ph)
+        new_sw = pw * base_scale * zoom_factor
+        new_sh = ph * base_scale * zoom_factor
+
+        canvas_cx = self.width() / 2
+        canvas_cy = self.height() / 2
+        new_pan_x = (canvas_cx - target_nx * new_sw) - (self.width() - new_sw) / 2
+        new_pan_y = (canvas_cy - target_ny * new_sh) - (self.height() - new_sh) / 2
+        self._pan_offset = QPointF(new_pan_x, new_pan_y)
+        self.update()
+        self.zoom_changed.emit(self._zoom)
+
+    def zoom_at(self, factor: float, center_pos: QPointF) -> None:
+        """Zoom centered at a specific canvas position."""
+        if not self._pixmap or self._pixmap.isNull():
+            return
+        old_rect = self._scaled_image_rect()
+        old_zoom = self._zoom
+        new_zoom = max(0.5, min(16.0, self._zoom * factor))
+        if abs(new_zoom - old_zoom) < 1e-4:
+            return
+
+        if old_rect.width() > 0 and old_rect.height() > 0:
+            nx = (center_pos.x() - old_rect.left()) / old_rect.width()
+            ny = (center_pos.y() - old_rect.top()) / old_rect.height()
+        else:
+            nx, ny = 0.5, 0.5
+
+        self._zoom = new_zoom
+        pw = self._pixmap.width()
+        ph = self._pixmap.height()
+        ww = max(10, self.width() - 20)
+        wh = max(10, self.height() - 20)
+        base_scale = min(ww / pw, wh / ph)
+        new_sw = pw * base_scale * new_zoom
+        new_sh = ph * base_scale * new_zoom
+
+        new_pan_x = (center_pos.x() - nx * new_sw) - (self.width() - new_sw) / 2
+        new_pan_y = (center_pos.y() - ny * new_sh) - (self.height() - new_sh) / 2
+        self._pan_offset = QPointF(new_pan_x, new_pan_y)
+        self.update()
+        self.zoom_changed.emit(self._zoom)
+
     # ── Paint ────────────────────────────────────────────────────────────────
 
     def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         painter.fillRect(self.rect(), QColor(PALETTE["bg"]))
 
         if self._pixmap is None or self._pixmap.isNull():
-            # Empty state helper
             painter.setPen(QColor(PALETTE["text_muted"]))
             painter.setFont(QFont("Segoe UI Variable Text", 12))
             painter.drawText(
                 self.rect(), Qt.AlignmentFlag.AlignCenter,
-                "Load a reference image to calibrate preset regions"
+                "Load a reference image to calibrate preset regions\n(Click 'Load Reference Image…' above)"
             )
             return
 
-        # Scaled image centered
         img_rect = self._scaled_image_rect()
         painter.drawPixmap(img_rect.toRect(), self._pixmap)
 
-        # Draw subtle outer border around image
+        # Subtle outer border around image
         painter.setPen(QPen(QColor(PALETTE["border_light"]), 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(img_rect)
@@ -125,51 +234,40 @@ class RegionEditorCanvas(QWidget):
         # Regions
         for i, region in enumerate(self._regions):
             color = self._colors[i % len(self._colors)]
-            self._draw_region(painter, region, color, i)
+            self._draw_region(painter, region, color, i, img_rect)
 
     def _draw_region(
         self, painter: QPainter, region: NormalizedRegion,
-        color: QColor, idx: int
+        color: QColor, idx: int, img_rect: QRectF
     ) -> None:
-        img_rect = self._scaled_image_rect()
         rx = img_rect.left() + region.x * img_rect.width()
         ry = img_rect.top() + region.y * img_rect.height()
         rw = region.width * img_rect.width()
         rh = region.height * img_rect.height()
         rect = QRectF(rx, ry, rw, rh)
 
-        # Region fill
-        fill = QColor(color)
-        fill.setAlpha(45)
-        painter.fillRect(rect, fill)
+        # 1. Subtle translucent fill (if enabled)
+        if self._show_fill:
+            fill = QColor(color)
+            fill.setAlpha(20)  # very subtle 8% tint so image pixels remain crystal clear
+            painter.fillRect(rect, fill)
 
-        # Region outline
+        # 2. High-contrast outline
         pen = QPen(color, 2)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(rect)
 
-        # Label badge (contrast-preserving pill)
-        label_text = region.label or f"Region {idx + 1}"
-        painter.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        text_w = painter.fontMetrics().horizontalAdvance(label_text) + 8
-        text_h = 16
-        pill_rect = QRectF(rx + 2, ry + 2, text_w, text_h)
+        # 3. Subtle alignment guide crosshairs in center (never obstructs text)
+        if rw > 14 and rh > 14:
+            cx = rx + rw / 2
+            cy = ry + rh / 2
+            guide_pen = QPen(QColor(color.red(), color.green(), color.blue(), 100), 1, Qt.PenStyle.DashLine)
+            painter.setPen(guide_pen)
+            painter.drawLine(QPointF(rx + 3, cy), QPointF(rx + rw - 3, cy))
+            painter.drawLine(QPointF(cx, ry + 3), QPointF(cx, ry + rh - 3))
 
-        badge_bg = QColor(PALETTE["surface_raised"])
-        badge_bg.setAlpha(220)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(badge_bg))
-        painter.drawRoundedRect(pill_rect, 3, 3)
-
-        painter.setPen(QPen(QColor(PALETTE["text_primary"])))
-        painter.drawText(
-            QRectF(rx + 6, ry + 3, text_w - 4, text_h),
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            label_text,
-        )
-
-        # Handles at corners (white border + color center)
+        # 4. Corner resize handles
         hs = self._HANDLE_SIZE
         half = hs / 2
         for hx, hy in [
@@ -183,21 +281,135 @@ class RegionEditorCanvas(QWidget):
             painter.setBrush(QBrush(color))
             painter.drawRoundedRect(handle_rect, 2, 2)
 
-    # ── Mouse events ────────────────────────────────────────────────────────
+        # 5. Label badge: positioned OUTSIDE the box so it NEVER blocks the watermark!
+        if self._show_labels:
+            label_text = region.label or f"Region {idx + 1}"
+            painter.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+            fm = painter.fontMetrics()
+            text_w = fm.horizontalAdvance(label_text) + 12
+            text_h = 18
 
-    def mousePressEvent(self, event: QMouseEvent) -> None:
-        if event.button() != Qt.MouseButton.LeftButton:
-            return
-        pos = QPointF(event.pos())
-        self._drag_region_idx, self._drag_handle = self._hit_test(pos)
-        if self._drag_region_idx >= 0:
-            self._drag_start_pos = pos
-            self._drag_start_region = copy.deepcopy(
-                self._regions[self._drag_region_idx]
+            # Place above the box; if too close to top edge, place below
+            badge_y = ry - text_h - 4
+            if badge_y < img_rect.top() + 2:
+                badge_y = ry + rh + 4
+
+            badge_x = max(img_rect.left(), min(rx, img_rect.right() - text_w))
+            pill_rect = QRectF(badge_x, badge_y, text_w, text_h)
+
+            badge_bg = QColor(PALETTE["surface_raised"])
+            badge_bg.setAlpha(235)
+            painter.setPen(QPen(color, 1))
+            painter.setBrush(QBrush(badge_bg))
+            painter.drawRoundedRect(pill_rect, 4, 4)
+
+            painter.setPen(QPen(QColor(PALETTE["text_primary"])))
+            painter.drawText(
+                pill_rect,
+                Qt.AlignmentFlag.AlignCenter,
+                label_text,
             )
 
+    # ── Mouse & Wheel events ────────────────────────────────────────────────
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        delta = event.angleDelta().y()
+        if delta == 0 or not self._pixmap or self._pixmap.isNull():
+            return
+        factor = 1.15 if delta > 0 else 1 / 1.15
+        self.zoom_at(factor, event.position())
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        pos = QPointF(event.position())
+        # Right or middle click starts panning
+        if event.button() in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton):
+            self._is_panning = True
+            self._pan_start_pos = pos
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            return
+
+        if event.button() == Qt.MouseButton.LeftButton:
+            hit_idx, hit_handle = self._hit_test(pos)
+            if hit_idx >= 0:
+                self._drag_region_idx = hit_idx
+                self._drag_handle = hit_handle
+                self._drag_start_pos = pos
+                self._drag_start_region = copy.deepcopy(self._regions[hit_idx])
+                self.region_selected.emit(hit_idx)
+            else:
+                # Left click on canvas background starts panning
+                self._is_panning = True
+                self._pan_start_pos = pos
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        pos = QPointF(event.pos())
+        pos = QPointF(event.position())
+
+        if self._is_panning:
+            delta = pos - self._pan_start_pos
+            self._pan_offset += delta
+            self._pan_start_pos = pos
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self.update()
+            return
+
+        if self._drag_region_idx >= 0:
+            img_rect = self._scaled_image_rect()
+            if img_rect.width() <= 0 or img_rect.height() <= 0:
+                return
+
+            dx = (pos.x() - self._drag_start_pos.x()) / img_rect.width()
+            dy = (pos.y() - self._drag_start_pos.y()) / img_rect.height()
+
+            orig = self._drag_start_region
+            region = self._regions[self._drag_region_idx]
+            m = self._MIN_DIM
+
+            if self._drag_handle == "body":
+                region.x = max(0.0, min(1.0 - orig.width, orig.x + dx))
+                region.y = max(0.0, min(1.0 - orig.height, orig.y + dy))
+
+            elif self._drag_handle == "nw":
+                new_x = max(0.0, orig.x + dx)
+                new_y = max(0.0, orig.y + dy)
+                new_w = orig.width - (new_x - orig.x)
+                new_h = orig.height - (new_y - orig.y)
+                if new_w >= m and new_h >= m:
+                    region.x = new_x
+                    region.y = new_y
+                    region.width = new_w
+                    region.height = new_h
+
+            elif self._drag_handle == "ne":
+                new_y = max(0.0, orig.y + dy)
+                new_w = max(m, orig.width + dx)
+                new_h = orig.height - (new_y - orig.y)
+                if new_h >= m and orig.x + new_w <= 1.0:
+                    region.y = new_y
+                    region.width = new_w
+                    region.height = new_h
+
+            elif self._drag_handle == "sw":
+                new_x = max(0.0, orig.x + dx)
+                new_w = orig.width - (new_x - orig.x)
+                new_h = max(m, orig.height + dy)
+                if new_w >= m and orig.y + new_h <= 1.0:
+                    region.x = new_x
+                    region.width = new_w
+                    region.height = new_h
+
+            elif self._drag_handle == "se":
+                new_w = max(m, orig.width + dx)
+                new_h = max(m, orig.height + dy)
+                if orig.x + new_w <= 1.0 and orig.y + new_h <= 1.0:
+                    region.width = new_w
+                    region.height = new_h
+
+            self.update()
+            self.regions_changed.emit(self.get_regions())
+            return
+
+        # Cursor shape when hovering
         hit_idx, hit_handle = self._hit_test(pos)
         if hit_handle in ("nw", "se"):
             self.setCursor(Qt.CursorShape.SizeFDiagCursor)
@@ -206,69 +418,27 @@ class RegionEditorCanvas(QWidget):
         elif hit_handle == "body":
             self.setCursor(Qt.CursorShape.SizeAllCursor)
         else:
-            self.setCursor(Qt.CursorShape.CrossCursor)
-
-        if self._drag_region_idx < 0:
-            return
-
-        img_rect = self._scaled_image_rect()
-        if img_rect.width() <= 0 or img_rect.height() <= 0:
-            return
-
-        dx = (pos.x() - self._drag_start_pos.x()) / img_rect.width()
-        dy = (pos.y() - self._drag_start_pos.y()) / img_rect.height()
-
-        orig = self._drag_start_region
-        region = self._regions[self._drag_region_idx]
-        m = self._MIN_DIM
-
-        if self._drag_handle == "body":
-            region.x = max(0.0, min(1.0 - orig.width, orig.x + dx))
-            region.y = max(0.0, min(1.0 - orig.height, orig.y + dy))
-
-        elif self._drag_handle == "nw":
-            new_x = max(0.0, orig.x + dx)
-            new_y = max(0.0, orig.y + dy)
-            new_w = orig.width - (new_x - orig.x)
-            new_h = orig.height - (new_y - orig.y)
-            if new_w >= m and new_h >= m:
-                region.x = new_x
-                region.y = new_y
-                region.width = new_w
-                region.height = new_h
-
-        elif self._drag_handle == "ne":
-            new_y = max(0.0, orig.y + dy)
-            new_w = max(m, orig.width + dx)
-            new_h = orig.height - (new_y - orig.y)
-            if new_h >= m and orig.x + new_w <= 1.0:
-                region.y = new_y
-                region.width = new_w
-                region.height = new_h
-
-        elif self._drag_handle == "sw":
-            new_x = max(0.0, orig.x + dx)
-            new_w = orig.width - (new_x - orig.x)
-            new_h = max(m, orig.height + dy)
-            if new_w >= m and orig.y + new_h <= 1.0:
-                region.x = new_x
-                region.width = new_w
-                region.height = new_h
-
-        elif self._drag_handle == "se":
-            new_w = max(m, orig.width + dx)
-            new_h = max(m, orig.height + dy)
-            if orig.x + new_w <= 1.0 and orig.y + new_h <= 1.0:
-                region.width = new_w
-                region.height = new_h
-
-        self.update()
-        self.regions_changed.emit(self.get_regions())
+            self.setCursor(
+                Qt.CursorShape.OpenHandCursor if (self._pixmap and not self._pixmap.isNull()) else Qt.CursorShape.ArrowCursor
+            )
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        self._is_panning = False
         self._drag_region_idx = -1
         self._drag_handle = ""
         self._drag_start_region = None
+        pos = QPointF(event.position())
+        hit_idx, hit_handle = self._hit_test(pos)
+        if hit_handle in ("nw", "se"):
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        elif hit_handle in ("ne", "sw"):
+            self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+        elif hit_handle == "body":
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+        else:
+            self.setCursor(
+                Qt.CursorShape.OpenHandCursor if (self._pixmap and not self._pixmap.isNull()) else Qt.CursorShape.ArrowCursor
+            )
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -277,13 +447,14 @@ class RegionEditorCanvas(QWidget):
             return QRectF(self.rect())
         pw = self._pixmap.width()
         ph = self._pixmap.height()
-        ww = self.width() - 20
-        wh = self.height() - 20
-        scale = min(ww / pw, wh / ph)
-        sw = pw * scale
-        sh = ph * scale
-        ox = (self.width() - sw) / 2
-        oy = (self.height() - sh) / 2
+        ww = max(10, self.width() - 20)
+        wh = max(10, self.height() - 20)
+        base_scale = min(ww / pw, wh / ph)
+        total_scale = base_scale * self._zoom
+        sw = pw * total_scale
+        sh = ph * total_scale
+        ox = (self.width() - sw) / 2 + self._pan_offset.x()
+        oy = (self.height() - sh) / 2 + self._pan_offset.y()
         return QRectF(ox, oy, sw, sh)
 
     def _hit_test(self, pos: QPointF) -> tuple[int, str]:
@@ -334,8 +505,8 @@ class SettingsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Settings — Flow Image Manager")
-        self.setMinimumSize(860, 600)
-        self.resize(920, 640)
+        self.setMinimumSize(940, 640)
+        self.resize(1020, 700)
 
         self._settings = settings
         self._region_mgr = region_mgr
@@ -408,42 +579,44 @@ class SettingsDialog(QDialog):
         proc_form.addRow("Default Preset:", self._default_preset_combo)
 
         self._conflict_combo = QComboBox()
-        self._conflict_combo.addItem("Generate unique filename (recommended)", "unique")
-        self._conflict_combo.addItem("Skip existing outputs", "skip")
-        self._conflict_combo.addItem("Ask each time", "ask")
+        self._conflict_combo.addItem("Unique name (append _1, _2)", "unique")
+        self._conflict_combo.addItem("Skip existing file", "skip")
         self._conflict_combo.setFixedWidth(240)
         proc_form.addRow("Filename Conflict:", self._conflict_combo)
 
         self._retry_spin = QSpinBox()
-        self._retry_spin.setRange(1, 10)
+        self._retry_spin.setRange(0, 10)
         self._retry_spin.setValue(2)
-        self._retry_spin.setFixedWidth(80)
+        self._retry_spin.setFixedWidth(70)
         proc_form.addRow("Retry Limit:", self._retry_spin)
 
-        self._review_check = QCheckBox("Require manual review before processing images")
+        self._review_check = QCheckBox("Require manual review before completing")
         proc_form.addRow("", self._review_check)
 
         layout.addWidget(proc_group)
 
-        # ── Display group ──────────────────────────────────────────────────
-        disp_group = QGroupBox("Display & Preview")
+        # ── UI & Display group ─────────────────────────────────────────────
+        disp_group = QGroupBox("Display & Performance")
         disp_form = QFormLayout(disp_group)
         disp_form.setSpacing(10)
         disp_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
 
         self._thumb_spin = QSpinBox()
-        self._thumb_spin.setRange(64, 256)
-        self._thumb_spin.setSingleStep(16)
-        self._thumb_spin.setFixedWidth(80)
-        disp_form.addRow("Thumbnail Size (px):", self._thumb_spin)
+        self._thumb_spin.setRange(64, 512)
+        self._thumb_spin.setSingleStep(32)
+        self._thumb_spin.setValue(128)
+        self._thumb_spin.setSuffix(" px")
+        self._thumb_spin.setFixedWidth(100)
+        disp_form.addRow("Thumbnail Size:", self._thumb_spin)
 
-        self._fit_check = QCheckBox("Auto-fit image to preview panel on selection")
+        self._fit_check = QCheckBox("Automatically fit image to panel on selection")
+        self._fit_check.setChecked(True)
         disp_form.addRow("", self._fit_check)
 
         layout.addWidget(disp_group)
 
         # ── Logging group ──────────────────────────────────────────────────
-        log_group = QGroupBox("Diagnostics & Logging")
+        log_group = QGroupBox("Logging")
         log_form = QFormLayout(log_group)
         log_form.setSpacing(10)
         log_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
@@ -484,7 +657,7 @@ class SettingsDialog(QDialog):
         self._preset_combo = QComboBox()
         self._preset_combo.addItem("Preset A — Single Region", "A")
         self._preset_combo.addItem("Preset B — Double Region", "B")
-        self._preset_combo.setFixedWidth(210)
+        self._preset_combo.setFixedWidth(260)  # Generous width so no label truncation
         self._preset_combo.currentIndexChanged.connect(self._on_preset_changed)
         top_lay.addWidget(self._preset_combo)
 
@@ -502,7 +675,7 @@ class SettingsDialog(QDialog):
         # Canvas + coordinates panel splitter
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # Canvas with rounded border container
+        # Canvas with rounded border container & integrated controls toolbar
         canvas_container = QFrame()
         canvas_container.setStyleSheet(f"""
             QFrame {{
@@ -512,11 +685,93 @@ class SettingsDialog(QDialog):
             }}
         """)
         canvas_lay = QVBoxLayout(canvas_container)
-        canvas_lay.setContentsMargins(4, 4, 4, 4)
+        canvas_lay.setContentsMargins(6, 6, 6, 6)
+        canvas_lay.setSpacing(6)
+
+        # ── Canvas Interactive Toolbar ──────────────────────────────────────
+        canvas_tb = QFrame()
+        canvas_tb.setStyleSheet(f"""
+            QFrame {{
+                background-color: {PALETTE['surface_raised']};
+                border: 1px solid {PALETTE['border_light']};
+                border-radius: 6px;
+            }}
+        """)
+        tb_lay = QHBoxLayout(canvas_tb)
+        tb_lay.setContentsMargins(8, 4, 8, 4)
+        tb_lay.setSpacing(6)
 
         self._canvas = RegionEditorCanvas()
         self._canvas.regions_changed.connect(self._on_regions_changed)
-        canvas_lay.addWidget(self._canvas)
+
+        zoom_in_btn = QPushButton()
+        zoom_in_btn.setIcon(get_icon("zoom-in", color=PALETTE["text_primary"], size=14))
+        zoom_in_btn.setToolTip("Zoom In (or scroll wheel up)")
+        zoom_in_btn.setFixedSize(28, 28)
+        zoom_in_btn.clicked.connect(self._canvas.zoom_in)
+        tb_lay.addWidget(zoom_in_btn)
+
+        zoom_out_btn = QPushButton()
+        zoom_out_btn.setIcon(get_icon("zoom-out", color=PALETTE["text_primary"], size=14))
+        zoom_out_btn.setToolTip("Zoom Out (or scroll wheel down)")
+        zoom_out_btn.setFixedSize(28, 28)
+        zoom_out_btn.clicked.connect(self._canvas.zoom_out)
+        tb_lay.addWidget(zoom_out_btn)
+
+        fit_btn = QPushButton("Fit")
+        fit_btn.setIcon(get_icon("fit", color=PALETTE["text_primary"], size=13))
+        fit_btn.setToolTip("Fit entire image to window")
+        fit_btn.setFixedHeight(28)
+        fit_btn.clicked.connect(self._canvas.zoom_fit)
+        tb_lay.addWidget(fit_btn)
+
+        tb_lay.addSpacing(4)
+
+        # Dedicated 1-click zoom to mark area!
+        zoom_mark_btn = QPushButton("🎯 Zoom to Mark (4x)")
+        zoom_mark_btn.setProperty("primary", "true")
+        zoom_mark_btn.setToolTip("Instantly magnify 400% directly into the bottom-right watermark area for pixel-perfect positioning")
+        zoom_mark_btn.setFixedHeight(28)
+        zoom_mark_btn.clicked.connect(lambda: self._canvas.zoom_to_mark(4.0))
+        tb_lay.addWidget(zoom_mark_btn)
+
+        tb_lay.addSpacing(6)
+
+        # Labels toggle button (prevents blocking watermark artwork)
+        self._labels_btn = QPushButton("Labels")
+        self._labels_btn.setIcon(get_icon("tag", color=PALETTE["text_primary"], size=13))
+        self._labels_btn.setCheckable(True)
+        self._labels_btn.setChecked(True)
+        self._labels_btn.setToolTip("Toggle text labels above region boxes on/off")
+        self._labels_btn.setFixedHeight(28)
+        self._labels_btn.toggled.connect(self._canvas.set_show_labels)
+        tb_lay.addWidget(self._labels_btn)
+
+        # Box fill toggle button
+        self._fill_btn = QPushButton("Fill Tint")
+        self._fill_btn.setIcon(get_icon("layers", color=PALETTE["text_primary"], size=13))
+        self._fill_btn.setCheckable(True)
+        self._fill_btn.setChecked(True)
+        self._fill_btn.setToolTip("Toggle translucent box fill on/off to see raw image pixels")
+        self._fill_btn.setFixedHeight(28)
+        self._fill_btn.toggled.connect(self._canvas.set_show_fill)
+        tb_lay.addWidget(self._fill_btn)
+
+        tb_lay.addStretch()
+
+        self._zoom_lbl = QLabel("100%")
+        self._zoom_lbl.setStyleSheet(f"font-size: 11px; font-weight: 700; color: {PALETTE['accent_light']}; padding: 0 4px;")
+        self._canvas.zoom_changed.connect(lambda z: self._zoom_lbl.setText(f"{int(z * 100)}%"))
+        tb_lay.addWidget(self._zoom_lbl)
+
+        canvas_lay.addWidget(canvas_tb)
+        canvas_lay.addWidget(self._canvas, stretch=1)
+
+        hint_lbl = QLabel("💡 Scroll wheel to zoom · Drag canvas (or Right-click) to pan · Drag corner handles to resize")
+        hint_lbl.setStyleSheet(f"font-size: 11px; color: {PALETTE['text_muted']}; padding: 2px 4px; background: transparent;")
+        hint_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        canvas_lay.addWidget(hint_lbl)
+
         splitter.addWidget(canvas_container)
 
         # Right panel: coordinate controls
@@ -575,7 +830,7 @@ class SettingsDialog(QDialog):
         right_lay.addWidget(reset_btn)
 
         splitter.addWidget(right_panel)
-        splitter.setSizes([620, 270])
+        splitter.setSizes([640, 270])
         layout.addWidget(splitter, stretch=1)
 
         return w
@@ -638,6 +893,9 @@ class SettingsDialog(QDialog):
         if path:
             if not self._canvas.load_reference(Path(path)):
                 QMessageBox.warning(self, "Error", f"Cannot load image:\n{path}")
+            else:
+                # Automatically focus 4x onto watermark area for convenience
+                self._canvas.zoom_to_mark(3.5)
 
     def _on_regions_changed(self, regions: list) -> None:
         preset = self._working_presets.get(self._current_preset_id)
