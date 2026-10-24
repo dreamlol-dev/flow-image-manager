@@ -19,7 +19,9 @@ python -m PyInstaller ^
     --onefile ^
     --windowed ^
     --clean ^
+    --icon "assets/icon.ico" ^
     --add-data "config;config" ^
+    --add-data "assets;assets" ^
     --add-data "app;app" ^
     --hidden-import "PySide6.QtCore" ^
     --hidden-import "PySide6.QtGui" ^

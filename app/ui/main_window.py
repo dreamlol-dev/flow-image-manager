@@ -259,6 +259,13 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1080, 680)
         self.resize(1340, 820)
 
+        # Set window icon
+        icon_path = self._project_dir / "assets" / "icon.png"
+        if not icon_path.exists():
+            icon_path = self._project_dir / "assets" / "icon.ico"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
+
         central = QWidget()
         self.setCentralWidget(central)
 
@@ -302,8 +309,23 @@ class MainWindow(QMainWindow):
         """)
 
         lay = QHBoxLayout(header)
-        lay.setContentsMargins(18, 0, 14, 0)
-        lay.setSpacing(0)
+        lay.setContentsMargins(14, 0, 14, 0)
+        lay.setSpacing(10)
+
+        # Application logo
+        icon_path = self._project_dir / "assets" / "icon.png"
+        if not icon_path.exists():
+            icon_path = self._project_dir / "assets" / "icon.ico"
+        if icon_path.exists():
+            logo_lbl = QLabel()
+            logo_pix = QPixmap(str(icon_path)).scaled(
+                34, 34,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            logo_lbl.setPixmap(logo_pix)
+            logo_lbl.setStyleSheet("background: transparent; border: none;")
+            lay.addWidget(logo_lbl, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         name_col = QVBoxLayout()
         name_col.setSpacing(1)

@@ -87,6 +87,21 @@ def main() -> None:
     app.setApplicationVersion("1.0.0")
     app.setOrganizationName("Flow Tools")
 
+    # Set Windows AppUserModelID so taskbar groups and shows custom icon properly
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("FlowTools.FlowImageManager.1.0")
+    except Exception:
+        pass
+
+    # Application icon
+    icon_path = _ROOT / "assets" / "icon.png"
+    if not icon_path.exists():
+        icon_path = _ROOT / "assets" / "icon.ico"
+    if icon_path.exists():
+        from PySide6.QtGui import QIcon
+        app.setWindowIcon(QIcon(str(icon_path)))
+
     # Apply dark stylesheet
     app.setStyleSheet(APP_STYLESHEET)
 
