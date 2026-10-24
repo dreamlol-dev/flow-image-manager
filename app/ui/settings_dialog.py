@@ -156,7 +156,7 @@ class RegionEditorCanvas(QWidget):
             target_nx = (min_x + max_x) / 2
             target_ny = (min_y + max_y) / 2
         else:
-            target_nx, target_ny = 0.9465, 0.8997
+            target_nx, target_ny = 0.9495, 0.9093
 
         self._zoom = zoom_factor
         pw = self._pixmap.width()

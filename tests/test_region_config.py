@@ -134,8 +134,8 @@ class TestRegionConfigManager:
         mgr = RegionConfigManager()
         mgr.get_preset("A").regions[0].x = 0.0
         mgr.reset_to_defaults()
-        # Default x for preset A is 0.9465
-        assert mgr.get_preset("A").regions[0].x == pytest.approx(0.9465, abs=0.001)
+        # Default x for preset A is 0.9495
+        assert mgr.get_preset("A").regions[0].x == pytest.approx(0.9495, abs=0.001)
 
     def test_serialization_roundtrip(self):
         mgr = RegionConfigManager()

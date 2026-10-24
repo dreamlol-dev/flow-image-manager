@@ -15,10 +15,10 @@
       "description": "One small mark near the bottom-right corner.",
       "regions": [
         {
-          "x": 0.9465,
-          "y": 0.8997,
-          "width": 0.0228,
-          "height": 0.0452,
+          "x": 0.9495,
+          "y": 0.9093,
+          "width": 0.0189,
+          "height": 0.0351,
           "label": "mark"
         }
       ]
@@ -29,17 +29,17 @@
       "description": "Two marks near the bottom-right corner: upper (larger) and lower (smaller).",
       "regions": [
         {
-          "x": 0.9053,
-          "y": 0.8373,
-          "width": 0.0486,
-          "height": 0.0733,
+          "x": 0.9108,
+          "y": 0.8401,
+          "width": 0.0374,
+          "height": 0.0680,
           "label": "upper_mark"
         },
         {
-          "x": 0.9465,
-          "y": 0.8997,
-          "width": 0.0228,
-          "height": 0.0452,
+          "x": 0.9495,
+          "y": 0.9093,
+          "width": 0.0189,
+          "height": 0.0351,
           "label": "lower_mark"
         }
       ]
