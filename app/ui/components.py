@@ -969,6 +969,55 @@ class ProgressSection(QFrame):
         else:
             self._timing_lbl.setText(f"Elapsed: {elapsed_str}")
 
+    def set_finished(
+        self,
+        completed: int,
+        failed: int,
+        total: int,
+        duration_s: float,
+        stopped: bool = False,
+    ) -> None:
+        """Update the progress section to its final complete/stopped state."""
+        processed = completed + failed
+        rem = max(0, total - processed)
+
+        # Elapsed
+        m, s = divmod(int(duration_s), 60)
+        h, m = divmod(m, 60)
+        if h:
+            dur_str = f"{h}h {m}m"
+        elif m:
+            dur_str = f"{m}m {s}s"
+        else:
+            dur_str = f"{s}s"
+
+        if total > 0:
+            pct = int(processed / total * 100)
+            if stopped:
+                self._bar.setValue(pct)
+                self._bar.setFormat(f"Stopped at {pct}%  ({processed}/{total})")
+            elif failed == 0:
+                self._bar.setValue(100)
+                self._bar.setFormat(f"100%  ({processed}/{total}) — Complete")
+            else:
+                self._bar.setValue(pct)
+                self._bar.setFormat(f"{pct}%  ({processed}/{total}) — {failed} Failed")
+        else:
+            self._bar.setValue(100)
+            self._bar.setFormat("Complete")
+
+        if stopped:
+            self._file_lbl.setText(f"Batch stopped by user ({completed} completed, {failed} failed)")
+        elif failed == 0:
+            self._file_lbl.setText(f"Batch completed: all {completed} image(s) processed successfully")
+        else:
+            self._file_lbl.setText(f"Batch finished: {completed} succeeded, {failed} failed")
+
+        self._set_pill_value(self._done_pill, str(completed))
+        self._set_pill_value(self._fail_pill, str(failed))
+        self._set_pill_value(self._rem_pill,  str(rem))
+        self._timing_lbl.setText(f"Total time: {dur_str}")
+
     def reset(self) -> None:
         self._bar.setValue(0)
         self._bar.setFormat("Ready")

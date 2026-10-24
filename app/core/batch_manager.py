@@ -125,6 +125,10 @@ class BatchWorker(QThread):
         with QMutexLocker(self._mutex):
             return self._stop_requested
 
+    def is_stopped(self) -> bool:
+        """Public thread-safe check if stop was requested."""
+        return self._is_stopped()
+
     # ------------------------------------------------------------------
     # Main run loop
     # ------------------------------------------------------------------
@@ -143,13 +147,20 @@ class BatchWorker(QThread):
                 log.info("Batch stopped by user at image %d/%d.", idx + 1, total)
                 break
 
-            remaining = total - idx - 1
+            remaining = total - idx
             elapsed = time.monotonic() - self._t_start
             self.progress_updated.emit(
                 self._completed, self._failed, remaining, record.filename, elapsed
             )
 
             self._process_one(record)
+
+            # Emit progress update immediately upon completing this image
+            remaining_after = max(0, total - (idx + 1))
+            elapsed = time.monotonic() - self._t_start
+            self.progress_updated.emit(
+                self._completed, self._failed, remaining_after, record.filename, elapsed
+            )
 
         elapsed = time.monotonic() - self._t_start
         log.info(

@@ -1144,10 +1144,20 @@ class MainWindow(QMainWindow):
     def _on_batch_finished(
         self, completed: int, failed: int, duration_s: float
     ) -> None:
+        self._completed = completed
+        self._failed    = failed
+
+        stopped = self._batch_worker.is_stopped() if self._batch_worker else False
+        self._progress.set_finished(
+            completed, failed, self._total_for_batch, duration_s, stopped=stopped
+        )
+        self._update_stats()
+
         m, s = divmod(int(duration_s), 60)
         time_str = f"{m}m {s}s" if m else f"{s}s"
-        msg = f"Done — {completed} completed, {failed} failed  ({time_str})"
-        self._set_status(msg, "success" if failed == 0 else "warning")
+        status_word = "Stopped" if stopped else "Done"
+        msg = f"{status_word} — {completed} completed, {failed} failed  ({time_str})"
+        self._set_status(msg, "warning" if (failed > 0 or stopped) else "success")
         log.info(msg)
 
         self._start_btn.setEnabled(True)

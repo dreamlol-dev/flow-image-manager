@@ -88,3 +88,14 @@ def make_image(
     img.save(str(path), format=fmt)
     return path
 
+
+@pytest.fixture(scope="session")
+def qapp():
+    """A persistent QApplication instance for UI component tests."""
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    return app
+
+
